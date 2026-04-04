@@ -1,0 +1,37 @@
+{
+  "target": "daily_qty",
+  "feature_count": 20,
+  "validation_rows_used": 108629,
+  "test_rows_used": 108981,
+  "winner_model": "RandomForestRegressor",
+  "results": [
+    {
+      "model": "RandomForestRegressor",
+      "split": "validation",
+      "rmse": 1.394807408244783,
+      "mae": 1.1101776282137747,
+      "rows": 108629
+    },
+    {
+      "model": "RandomForestRegressor",
+      "split": "test",
+      "rmse": 1.3954221581418946,
+      "mae": 1.109572313531408,
+      "rows": 108981
+    },
+    {
+      "model": "HistGradientBoostingRegressor",
+      "split": "validation",
+      "rmse": 1.3949000467621786,
+      "mae": 1.1099941339498924,
+      "rows": 108629
+    },
+    {
+      "model": "HistGradientBoostingRegressor",
+      "split": "test",
+      "rmse": 1.3958058288380095,
+      "mae": 1.1092419393906625,
+      "rows": 108981
+    }
+  ]
+}
