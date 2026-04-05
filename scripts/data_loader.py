@@ -17,9 +17,12 @@ class DataPreprocessor:
     def run(self) -> pd.DataFrame:
         """Run preprocessing steps in sequence and return cleaned DataFrame."""
         self.load_data()
+        self.normalize_column_names()
         self.format_dates()
-        self.handle_missing_values()
+        self.smart_imputation()
+        self.drop_unusable_rows()
         self.clean_anomalies()
+        self.optimize_dtypes()
         self.export_data()
         return self.df
 
@@ -30,31 +33,68 @@ class DataPreprocessor:
 
         self.df = pd.read_csv(self.input_path)
 
+    def normalize_column_names(self) -> None:
+        """Strip leading/trailing spaces from column names."""
+        self._ensure_loaded()
+        self.df.columns = self.df.columns.str.strip()
+
     def format_dates(self) -> None:
-        """Convert Date column to pandas datetime format."""
+        """Convert Date column to pandas datetime format robustly."""
         self._ensure_loaded()
 
         if "Date" not in self.df.columns:
             raise KeyError("Missing required column: 'Date'")
 
-        self.df["Date"] = pd.to_datetime(self.df["Date"], errors="coerce")
+        # Parse mixed date formats while coercing invalid values to NaT.
+        self.df["Date"] = pd.to_datetime(
+            self.df["Date"],
+            errors="coerce",
+            infer_datetime_format=True,
+            dayfirst=False,
+        )
 
-    def handle_missing_values(self) -> None:
-        """Fill numeric nulls and drop rows missing essential IDs."""
+    def smart_imputation(self) -> None:
+        """Impute missing numeric and categorical values with domain-aware defaults."""
         self._ensure_loaded()
 
-        # Fill all numeric columns (e.g., Price, SellingPrice, Quantity) with zero.
-        numeric_columns = self.df.select_dtypes(include=["number"]).columns
-        self.df.loc[:, numeric_columns] = self.df.loc[:, numeric_columns].fillna(0)
+        # Fill target numeric features with 0 when missing.
+        numeric_targets = ["Quantity", "SellingPrice"]
+        for col in numeric_targets:
+            if col in self.df.columns:
+                self.df[col] = pd.to_numeric(self.df[col], errors="coerce").fillna(0)
 
-        # Drop rows with missing identifiers used to track products and transactions.
-        essential_columns = ["Item_ID", "Transaction_ID"]
-        present_essential_columns = [
-            col for col in essential_columns if col in self.df.columns
+        # Fill any other numeric columns with 0 as a safe default.
+        numeric_columns = self.df.select_dtypes(include=["number"]).columns
+        if len(numeric_columns) > 0:
+            self.df.loc[:, numeric_columns] = self.df.loc[:, numeric_columns].fillna(0)
+
+        # Fill categorical columns with "Unknown" to preserve rows.
+        categorical_columns = self.df.select_dtypes(
+            include=["object", "string", "category"]
+        ).columns
+        if len(categorical_columns) > 0:
+            self.df.loc[:, categorical_columns] = self.df.loc[:, categorical_columns].fillna(
+                "Unknown"
+            )
+
+    def drop_unusable_rows(self) -> None:
+        """Drop rows only when all essential product identifiers are missing."""
+        self._ensure_loaded()
+
+        essential_identifier_columns = ["Item_ID", "ProductID", "ProductName"]
+        present_identifier_columns = [
+            col for col in essential_identifier_columns if col in self.df.columns
         ]
 
-        if present_essential_columns:
-            self.df = self.df.dropna(subset=present_essential_columns)
+        if present_identifier_columns:
+            # Normalize empty strings/spaces to NA before dropping.
+            self.df.loc[:, present_identifier_columns] = self.df.loc[
+                :, present_identifier_columns
+            ].replace(r"^\s*$", pd.NA, regex=True)
+            self.df = self.df.dropna(subset=present_identifier_columns, how="all")
+
+        # Date cannot be used for time-series learning when missing.
+        self.df = self.df.dropna(subset=["Date"])
 
     def clean_anomalies(self) -> None:
         """Remove rows with invalid sales signals such as non-positive quantity/price."""
@@ -65,6 +105,20 @@ class DataPreprocessor:
 
         if "SellingPrice" in self.df.columns:
             self.df = self.df[self.df["SellingPrice"] > 0]
+
+    def optimize_dtypes(self) -> None:
+        """Optimize data types for stable model inputs and memory usage."""
+        self._ensure_loaded()
+
+        if "Quantity" in self.df.columns:
+            self.df["Quantity"] = pd.to_numeric(self.df["Quantity"], errors="coerce")
+            self.df["Quantity"] = self.df["Quantity"].fillna(0).astype("int64")
+
+        if "SellingPrice" in self.df.columns:
+            self.df["SellingPrice"] = pd.to_numeric(
+                self.df["SellingPrice"], errors="coerce"
+            )
+            self.df["SellingPrice"] = self.df["SellingPrice"].fillna(0).astype("float64")
 
     def export_data(self) -> None:
         """Save cleaned output to processed directory."""
