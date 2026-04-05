@@ -49,7 +49,6 @@ class DataPreprocessor:
         self.df["Date"] = pd.to_datetime(
             self.df["Date"],
             errors="coerce",
-            infer_datetime_format=True,
             dayfirst=False,
         )
 
