@@ -7,7 +7,13 @@ from typing import Sequence
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_absolute_percentage_error,
+    mean_squared_error,
+    r2_score,
+)
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 
 try:
     from xgboost import XGBRegressor
@@ -27,6 +33,8 @@ class TrainingArtifacts:
     test_rows: int
     mae: float
     rmse: float
+    r2: float
+    mape: float
 
 
 class DemandForecaster:
@@ -52,16 +60,17 @@ class DemandForecaster:
         self.df_aggregated: pd.DataFrame | None = None
         self.df_features: pd.DataFrame | None = None
         self.model: XGBRegressor | None = None
+        self.best_params: dict[str, object] = {}
         self.feature_columns: list[str] = []
 
     def run(self) -> TrainingArtifacts:
         """Execute full pipeline from load to model serialization."""
         self.load_data()
         self.aggregate_daily_item_demand()
-        self.create_lag_features()
+        self.create_features()
         X_train, X_test, y_train, y_test = self.time_series_split()
         self.train_model(X_train, y_train)
-        mae, rmse = self.evaluate(X_test, y_test)
+        mae, rmse, r2, mape = self.evaluate(X_test, y_test)
         self.serialize_model()
 
         return TrainingArtifacts(
@@ -71,6 +80,8 @@ class DemandForecaster:
             test_rows=len(X_test),
             mae=mae,
             rmse=rmse,
+            r2=r2,
+            mape=mape,
         )
 
     def load_data(self) -> None:
@@ -79,6 +90,7 @@ class DemandForecaster:
             raise FileNotFoundError(f"Input file not found: {self.input_path}")
 
         self.df_raw = pd.read_csv(self.input_path)
+        self.df_raw.columns = self.df_raw.columns.str.strip()
 
         required = {self.date_col, self.target_col}
         missing_required = required - set(self.df_raw.columns)
@@ -87,7 +99,9 @@ class DemandForecaster:
 
         if self.product_col not in self.df_raw.columns:
             product_fallbacks = ["Product_ID", "ProductName", "SKU", "ItemId"]
-            fallback = next((c for c in product_fallbacks if c in self.df_raw.columns), None)
+            fallback = next(
+                (c for c in product_fallbacks if c in self.df_raw.columns), None
+            )
             if fallback is None:
                 raise KeyError(
                     "Could not find item/product identifier column. "
@@ -115,8 +129,8 @@ class DemandForecaster:
 
         self.df_aggregated = grouped
 
-    def create_lag_features(self) -> None:
-        """Generate lag-based features for each item and drop resulting NaNs."""
+    def create_features(self) -> None:
+        """Generate lag, rolling, and calendar features for each item."""
         self._ensure(
             self.df_aggregated,
             "Aggregated data is not available. Call aggregate_daily_item_demand() first.",
@@ -127,16 +141,25 @@ class DemandForecaster:
         for lag in self.lag_steps:
             df[f"lag_{lag}"] = df.groupby(self.product_col)[self.target_col].shift(lag)
 
-        # Time features are useful for capturing calendar effects.
+        # Use past values only in rolling window to avoid target leakage.
+        df["rolling_mean_7"] = (
+            df.groupby(self.product_col)[self.target_col]
+            .transform(lambda s: s.shift(1).rolling(window=7, min_periods=7).mean())
+        )
+
+        # Time-based features to capture weekly/monthly seasonality.
         df["DayOfWeek"] = df[self.date_col].dt.dayofweek
         df["Is_Weekend"] = (df[self.date_col].dt.dayofweek >= 5).astype(int)
+        df["Month"] = df[self.date_col].dt.month
+        df["DayOfMonth"] = df[self.date_col].dt.day
 
         lag_cols = [f"lag_{lag}" for lag in self.lag_steps]
-        df = df.dropna(subset=lag_cols).reset_index(drop=True)
+        required_feature_cols = lag_cols + ["rolling_mean_7"]
+        df = df.dropna(subset=required_feature_cols).reset_index(drop=True)
 
         if df.empty:
             raise ValueError(
-                "No rows left after lag feature creation. "
+                "No rows left after feature engineering. "
                 "Try reducing lag steps or verify data volume."
             )
 
@@ -148,7 +171,7 @@ class DemandForecaster:
         """Chronologically split data using unique dates (no random sampling)."""
         self._ensure(
             self.df_features,
-            "Feature data is not available. Call create_lag_features() first.",
+            "Feature data is not available. Call create_features() first.",
         )
 
         if not 0 < self.train_ratio < 1:
@@ -174,8 +197,8 @@ class DemandForecaster:
             )
 
         lag_cols = [f"lag_{lag}" for lag in self.lag_steps]
-        calendar_cols = ["DayOfWeek", "Is_Weekend"]
-        self.feature_columns = lag_cols + calendar_cols
+        advanced_cols = ["rolling_mean_7", "DayOfWeek", "Is_Weekend", "Month", "DayOfMonth"]
+        self.feature_columns = lag_cols + advanced_cols
 
         X_train = train_df[self.feature_columns]
         y_train = train_df[self.target_col]
@@ -185,32 +208,65 @@ class DemandForecaster:
         return X_train, X_test, y_train, y_test
 
     def train_model(self, X_train: pd.DataFrame, y_train: pd.Series) -> None:
-        """Train XGBoost regressor on the training time window."""
-        self.model = XGBRegressor(
-            n_estimators=500,
-            learning_rate=0.05,
-            max_depth=6,
-            subsample=0.9,
-            colsample_bytree=0.9,
+        """Tune and train XGBoost regressor using time-series cross-validation."""
+        base_model = XGBRegressor(
             objective="reg:squarederror",
             random_state=42,
-            n_jobs=-1,
+            n_jobs=1,
         )
-        self.model.fit(X_train, y_train)
 
-    def evaluate(self, X_test: pd.DataFrame, y_test: pd.Series) -> tuple[float, float]:
+        param_grid = {
+            "n_estimators": [100, 200],
+            "learning_rate": [0.05, 0.1],
+            "max_depth": [3, 5, 7],
+        }
+
+        tscv = TimeSeriesSplit(n_splits=3)
+        grid = GridSearchCV(
+            estimator=base_model,
+            param_grid=param_grid,
+            scoring="neg_root_mean_squared_error",
+            cv=tscv,
+            n_jobs=1,
+            verbose=0,
+        )
+        grid.fit(X_train, y_train)
+
+        self.model = grid.best_estimator_
+        self.best_params = dict(grid.best_params_)
+
+        print(f"Best params from GridSearchCV: {self.best_params}")
+
+    def evaluate(
+        self, X_test: pd.DataFrame, y_test: pd.Series
+    ) -> tuple[float, float, float, float]:
         """Evaluate forecasting quality on holdout period."""
         self._ensure(self.model, "Model is not trained. Call train_model() first.")
 
         y_pred = self.model.predict(X_test)
-        mae = mean_absolute_error(y_test, y_pred)
+        mae = float(mean_absolute_error(y_test, y_pred))
         rmse = float(np.sqrt(mean_squared_error(y_test, y_pred)))
+        r2 = float(r2_score(y_test, y_pred))
+
+        non_zero_mask = y_test.to_numpy() != 0
+        if non_zero_mask.any():
+            mape = float(
+                mean_absolute_percentage_error(
+                    y_test.to_numpy()[non_zero_mask],
+                    y_pred[non_zero_mask],
+                )
+                * 100
+            )
+        else:
+            mape = 0.0
 
         print("Evaluation on chronological test set")
         print(f"MAE  : {mae:.4f}")
         print(f"RMSE : {rmse:.4f}")
+        print(f"R-squared : {r2:.4f}")
+        print(f"MAPE : {mape:.4f}%")
 
-        return float(mae), float(rmse)
+        return mae, rmse, r2, mape
 
     def serialize_model(self) -> None:
         """Persist trained model artifact for downstream inference."""
@@ -243,6 +299,10 @@ def main() -> None:
     print(f"Train rows: {artifacts.train_rows}")
     print(f"Test rows : {artifacts.test_rows}")
     print(f"Features  : {artifacts.feature_columns}")
+    print(f"MAE       : {artifacts.mae:.4f}")
+    print(f"RMSE      : {artifacts.rmse:.4f}")
+    print(f"R-squared : {artifacts.r2:.4f}")
+    print(f"MAPE      : {artifacts.mape:.4f}%")
 
 
 if __name__ == "__main__":
