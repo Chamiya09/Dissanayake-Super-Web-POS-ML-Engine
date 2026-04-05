@@ -109,7 +109,7 @@ class DemandForecaster:
                 self.target_col
             ]
             .sum()
-            .sort_values(self.date_col)
+            .sort_values([self.date_col, self.product_col])
             .reset_index(drop=True)
         )
 
@@ -128,8 +128,8 @@ class DemandForecaster:
             df[f"lag_{lag}"] = df.groupby(self.product_col)[self.target_col].shift(lag)
 
         # Time features are useful for capturing calendar effects.
-        df["day_of_week"] = df[self.date_col].dt.dayofweek
-        df["month"] = df[self.date_col].dt.month
+        df["DayOfWeek"] = df[self.date_col].dt.dayofweek
+        df["Is_Weekend"] = (df[self.date_col].dt.dayofweek >= 5).astype(int)
 
         lag_cols = [f"lag_{lag}" for lag in self.lag_steps]
         df = df.dropna(subset=lag_cols).reset_index(drop=True)
@@ -174,7 +174,7 @@ class DemandForecaster:
             )
 
         lag_cols = [f"lag_{lag}" for lag in self.lag_steps]
-        calendar_cols = ["day_of_week", "month"]
+        calendar_cols = ["DayOfWeek", "Is_Weekend"]
         self.feature_columns = lag_cols + calendar_cols
 
         X_train = train_df[self.feature_columns]
