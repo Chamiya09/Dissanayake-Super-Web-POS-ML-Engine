@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -69,7 +70,7 @@ class DataPreprocessor:
         """Save cleaned output to processed directory."""
         self._ensure_loaded()
 
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        os.makedirs(self.output_path.parent, exist_ok=True)
         self.df.to_csv(self.output_path, index=False)
 
     def _ensure_loaded(self) -> None:
@@ -79,7 +80,7 @@ class DataPreprocessor:
 
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
-    input_file = project_root / "data" / "raw" / "raw_pos_data.csv"
+    input_file = project_root / "data" / "raw" / "DISSANAYAKA POS DATASET.csv"
     output_file = project_root / "data" / "processed" / "cleaned_pos_data.csv"
 
     preprocessor = DataPreprocessor(input_path=input_file, output_path=output_file)
