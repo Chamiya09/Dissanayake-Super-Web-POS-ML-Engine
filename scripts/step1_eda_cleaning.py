@@ -4,290 +4,224 @@ import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import seaborn as sns
 
 
+RAW_FALLBACK_NAME = "DISSANAYAKA_POS_DATASET_2019-2025.csv"
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Step 1: Data cleaning and advanced EDA")
+    parser = argparse.ArgumentParser(
+        description="Step 1: Professional Data Cleaning and EDA"
+    )
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("data/raw/DISSANAYAKA_POS_DATASET_2019_ONWARDS.csv"),
-        help="Path to raw POS CSV",
+        default=Path("data/raw/DISSANAYAKA_FINAL_DATASET.csv"),
+        help="Raw input dataset path",
     )
     parser.add_argument(
-        "--output",
+        "--output-cleaned",
         type=Path,
         default=Path("data/processed/cleaned_pos_data.csv"),
-        help="Path to cleaned CSV output",
+        help="Output path for cleaned dataset",
     )
     parser.add_argument(
         "--plots-dir",
         type=Path,
         default=Path("exports/plots"),
-        help="Directory for exported PNG plots",
+        help="Directory to save EDA plots",
     )
     return parser.parse_args()
 
 
-def resolve_input_path(input_path: Path) -> Path:
+def resolve_path(path: Path, project_root: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return project_root / path
+
+
+def resolve_input_with_fallback(input_path: Path) -> Path:
     if input_path.exists():
         return input_path
 
-    # Fallback to first matching dataset if the exact filename differs.
-    candidates = sorted(input_path.parent.glob("DISSANAYAKA_POS_DATASET_*.csv"))
-    if candidates:
-        print(
-            f"[WARN] Input not found at {input_path}. "
-            f"Using fallback dataset: {candidates[0]}"
-        )
-        return candidates[0]
+    fallback = input_path.parent / RAW_FALLBACK_NAME
+    if fallback.exists():
+        print(f"[WARN] Input not found at {input_path}. Using fallback: {fallback}")
+        return fallback
 
-    raise FileNotFoundError(f"Raw dataset not found: {input_path}")
+    raise FileNotFoundError(f"Dataset not found: {input_path}")
 
 
 def round_to_nearest_10(series: pd.Series) -> pd.Series:
-    return (np.round(series.astype(float) / 10.0) * 10.0).astype(int)
+    return (series.div(10).round().mul(10)).astype("int64")
 
 
-def clean_pos_data(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+def load_and_validate(input_path: Path) -> pd.DataFrame:
+    df = pd.read_csv(input_path, low_memory=False)
+    df.columns = [c.strip() for c in df.columns]
+
     required_cols = {
         "TransactionID",
         "Date",
         "Time",
+        "ProductID",
         "ProductName",
-        "Quantity",
-        "SellingPrice",
+        "Category",
+        "UnitPrice",
         "BuyingPrice",
+        "SellingPrice",
+        "Quantity",
         "Total_LKR",
     }
     missing = required_cols - set(df.columns)
     if missing:
         raise KeyError(f"Missing required columns: {sorted(missing)}")
 
-    # Normalize column names and strip string values.
-    df.columns = [c.strip() for c in df.columns]
-    object_cols = df.select_dtypes(include=["object", "string"]).columns
-    for col in object_cols:
-        df[col] = df[col].astype(str).str.strip()
-
-    # Parse date and time robustly.
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    time_parsed = pd.to_datetime(df["Time"], format="%H:%M:%S", errors="coerce")
-    df["Time"] = time_parsed.dt.strftime("%H:%M:%S")
-    df["DateTime"] = pd.to_datetime(
-        df["Date"].dt.strftime("%Y-%m-%d") + " " + df["Time"],
-        errors="coerce",
-    )
+    df["Time"] = pd.to_datetime(df["Time"], format="%H:%M:%S", errors="coerce").dt.time
 
-    # Numeric coercion.
-    numeric_cols = ["Quantity", "SellingPrice", "BuyingPrice", "Total_LKR"]
+    numeric_cols = ["UnitPrice", "BuyingPrice", "SellingPrice", "Quantity", "Total_LKR"]
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Null handling: drop rows missing critical business fields, impute others.
-    critical_cols = ["TransactionID", "Date", "Time", "DateTime", "ProductName", "Quantity"]
-    before_drop = len(df)
-    df = df.dropna(subset=critical_cols).copy()
-    dropped_rows = before_drop - len(df)
+    df = df.dropna(
+        subset=[
+            "TransactionID",
+            "Date",
+            "Time",
+            "ProductID",
+            "ProductName",
+            "Category",
+            "UnitPrice",
+            "BuyingPrice",
+            "SellingPrice",
+            "Quantity",
+            "Total_LKR",
+        ]
+    ).copy()
 
-    # Impute numeric non-critical values using column medians.
-    for col in ["SellingPrice", "BuyingPrice", "Total_LKR"]:
-        if df[col].isna().any():
-            df[col] = df[col].fillna(df[col].median())
+    if df.empty:
+        raise ValueError("No rows available after null and type validation.")
 
-    # If any category-like columns still have nulls, fill with Unknown.
-    object_cols = df.select_dtypes(include=["object", "string"]).columns
-    for col in object_cols:
-        if df[col].isna().any():
-            df[col] = df[col].fillna("Unknown")
-
-    # Ensure money columns have no decimals; if decimals exist, round to nearest 10 and cast to int.
-    rounded_counts: dict[str, int] = {}
-    for col in ["SellingPrice", "BuyingPrice", "Total_LKR"]:
-        has_decimal = ~np.isclose(df[col].to_numpy() % 1, 0.0)
-        decimal_count = int(has_decimal.sum())
-        rounded_counts[col] = decimal_count
-        if decimal_count > 0:
-            df[col] = round_to_nearest_10(df[col])
-        else:
-            df[col] = df[col].round().astype(int)
-
-    # Quantity is discrete by business meaning.
-    df["Quantity"] = df["Quantity"].round().astype(int)
-
-    # Chronological integrity check: transaction numeric id should not go backward over time.
-    tx_audit = (
-        df.groupby("TransactionID", as_index=False)["DateTime"]
-        .min()
-        .sort_values("DateTime")
-        .reset_index(drop=True)
+    datetime_index = pd.to_datetime(
+        df["Date"].dt.strftime("%Y-%m-%d") + " " + df["Time"].astype(str),
+        errors="coerce",
     )
-    tx_audit["TxnNum"] = (
-        tx_audit["TransactionID"].astype(str).str.extract(r"(\d+)", expand=False)
-    )
-    tx_audit["TxnNum"] = pd.to_numeric(tx_audit["TxnNum"], errors="coerce")
-    tx_audit = tx_audit.dropna(subset=["TxnNum"]).copy()
-    tx_audit["TxnNumDiff"] = tx_audit["TxnNum"].diff()
-    chronology_violations = int((tx_audit["TxnNumDiff"] < 0).sum())
+    if datetime_index.isna().any():
+        raise ValueError("Failed to construct valid transaction datetime for all rows.")
 
-    audit_summary = {
-        "rows_after_cleaning": len(df),
-        "rows_dropped_for_critical_nulls": dropped_rows,
-        "chronology_violations": chronology_violations,
-        "sellingprice_decimal_rows_rounded": rounded_counts["SellingPrice"],
-        "buyingprice_decimal_rows_rounded": rounded_counts["BuyingPrice"],
-        "totallkr_decimal_rows_rounded": rounded_counts["Total_LKR"],
-    }
+    df["TransactionDateTime"] = datetime_index
 
-    return df, audit_summary
+    # Ensure transaction records are chronologically ordered by Date + Time + TransactionID.
+    df = df.sort_values(["Date", "Time", "TransactionID"]).reset_index(drop=True)
+
+    return df
 
 
-def setup_plot_style() -> None:
-    sns.set_theme(style="whitegrid", context="talk")
-    plt.rcParams["figure.dpi"] = 120
+def apply_price_cleaning(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    price_cols = ["UnitPrice", "BuyingPrice", "SellingPrice", "Total_LKR"]
+
+    for col in price_cols:
+        out[col] = round_to_nearest_10(out[col])
+
+    out["Quantity"] = out["Quantity"].astype("int64")
+
+    return out
 
 
-def plot_inflation_audit(df: pd.DataFrame, plots_dir: Path) -> None:
-    monthly_price = (
-        df.set_index("Date")
-        .resample("MS")["SellingPrice"]
+def plot_inflation_check(df: pd.DataFrame, plots_dir: Path) -> None:
+    monthly = (
+        df.assign(Month=df["Date"].dt.to_period("M").dt.to_timestamp())
+        .groupby("Month", as_index=False)["SellingPrice"]
         .mean()
-        .reset_index()
     )
 
     plt.figure(figsize=(14, 6))
-    sns.lineplot(data=monthly_price, x="Date", y="SellingPrice", linewidth=2.5, color="#1f77b4")
-    plt.title("Inflation Audit: Mean Monthly SellingPrice (2019-Present)")
+    sns.lineplot(data=monthly, x="Month", y="SellingPrice", linewidth=2.2, color="#d1495b")
+    plt.title("Inflation Check: Average Monthly SellingPrice")
     plt.xlabel("Month")
-    plt.ylabel("Mean SellingPrice (LKR)")
+    plt.ylabel("Avg SellingPrice")
     plt.tight_layout()
-    plt.savefig(plots_dir / "inflation_audit_mean_monthly_selling_price.png")
+    plt.savefig(plots_dir / "inflation_check_monthly_selling_price.png", dpi=150)
     plt.close()
 
 
-def plot_seasonality_heatmap(df: pd.DataFrame, plots_dir: Path) -> None:
-    seasonality = df.copy()
-    seasonality["MonthName"] = seasonality["Date"].dt.month_name().str.slice(0, 3)
-    seasonality["DayOfWeekName"] = seasonality["Date"].dt.day_name().str.slice(0, 3)
+def plot_seasonality_check(df: pd.DataFrame, plots_dir: Path) -> None:
+    daily = df.groupby("Date", as_index=False)["Quantity"].sum()
 
-    month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    dow_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    plt.figure(figsize=(16, 6))
+    sns.lineplot(data=daily, x="Date", y="Quantity", linewidth=1.8, color="#00798c")
+    plt.title("Seasonality Check: Total Daily Quantity Sold")
+    plt.xlabel("Date")
+    plt.ylabel("Total Quantity Sold")
+    plt.tight_layout()
+    plt.savefig(plots_dir / "seasonality_daily_quantity.png", dpi=150)
+    plt.close()
 
-    pivot = (
-        seasonality.pivot_table(
-            index="MonthName",
-            columns="DayOfWeekName",
-            values="Quantity",
-            aggfunc="sum",
-            fill_value=0,
-        )
-        .reindex(index=month_order, columns=dow_order)
+
+def plot_basket_analysis(df: pd.DataFrame, plots_dir: Path) -> None:
+    basket_sizes = df.groupby("TransactionID").size().rename("items_per_transaction").reset_index()
+
+    plt.figure(figsize=(10, 6))
+    sns.histplot(
+        basket_sizes["items_per_transaction"],
+        bins=range(1, int(basket_sizes["items_per_transaction"].max()) + 2),
+        color="#edae49",
+        edgecolor="black",
     )
-
-    plt.figure(figsize=(12, 8))
-    sns.heatmap(pivot, cmap="YlOrRd", linewidths=0.5, annot=False)
-    plt.title("Seasonality Heatmap: Total Quantity by Month vs Day of Week")
-    plt.xlabel("Day of Week")
-    plt.ylabel("Month")
+    plt.title("Basket Analysis: Distribution of Items per TransactionID")
+    plt.xlabel("Items per Transaction")
+    plt.ylabel("Transaction Count")
     plt.tight_layout()
-    plt.savefig(plots_dir / "seasonality_heatmap_month_vs_dayofweek_quantity.png")
+    plt.savefig(plots_dir / "basket_analysis_items_per_transaction.png", dpi=150)
     plt.close()
 
 
-def plot_pareto_top_products(df: pd.DataFrame, plots_dir: Path) -> None:
-    top_products = (
+def plot_top_items(df: pd.DataFrame, plots_dir: Path) -> None:
+    top_items = (
         df.groupby("ProductName", as_index=False)["Total_LKR"]
         .sum()
         .sort_values("Total_LKR", ascending=False)
-        .head(30)
+        .head(20)
     )
 
-    plt.figure(figsize=(16, 8))
-    sns.barplot(
-        data=top_products,
-        x="Total_LKR",
-        y="ProductName",
-        orient="h",
-        color="#4c72b0",
-    )
-    plt.title("Pareto Distribution: Top 30 Products by Total Revenue")
-    plt.xlabel("Total Revenue (LKR)")
+    plt.figure(figsize=(14, 9))
+    sns.barplot(data=top_items, x="Total_LKR", y="ProductName", color="#30638e")
+    plt.title("Top 20 Items by Total Sales")
+    plt.xlabel("Total Sales (LKR)")
     plt.ylabel("Product")
     plt.tight_layout()
-    plt.savefig(plots_dir / "pareto_top30_products_revenue.png")
+    plt.savefig(plots_dir / "top_20_items_total_sales.png", dpi=150)
     plt.close()
 
 
-def plot_basket_size_histogram(df: pd.DataFrame, plots_dir: Path) -> None:
-    basket_sizes = df.groupby("TransactionID").size().rename("ItemsPerTransaction")
+def run(input_path: Path, output_cleaned: Path, plots_dir: Path) -> None:
+    cleaned = load_and_validate(input_path)
+    cleaned = apply_price_cleaning(cleaned)
 
-    plt.figure(figsize=(12, 6))
-    sns.histplot(basket_sizes, bins=range(1, 12), kde=False, color="#2ca02c")
-    plt.title("Basket Size Analysis: Items per Transaction")
-    plt.xlabel("Number of Items per Transaction")
-    plt.ylabel("Transaction Count")
-    plt.xticks(range(1, 11))
-    plt.tight_layout()
-    plt.savefig(plots_dir / "basket_size_histogram_items_per_transaction.png")
-    plt.close()
-
-
-def plot_daily_sales_volume(df: pd.DataFrame, plots_dir: Path) -> None:
-    daily_qty = (
-        df.groupby("Date", as_index=False)["Quantity"]
-        .sum()
-        .sort_values("Date")
-    )
-
-    plt.figure(figsize=(16, 6))
-    sns.lineplot(data=daily_qty, x="Date", y="Quantity", linewidth=1.8, color="#d62728")
-    plt.title("Daily Sales Volume: Total Quantity Sold")
-    plt.xlabel("Date")
-    plt.ylabel("Total Quantity")
-    plt.tight_layout()
-    plt.savefig(plots_dir / "daily_sales_volume_total_quantity.png")
-    plt.close()
-
-
-def generate_all_plots(df: pd.DataFrame, plots_dir: Path) -> None:
-    setup_plot_style()
     plots_dir.mkdir(parents=True, exist_ok=True)
+    output_cleaned.parent.mkdir(parents=True, exist_ok=True)
 
-    plot_inflation_audit(df, plots_dir)
-    plot_seasonality_heatmap(df, plots_dir)
-    plot_pareto_top_products(df, plots_dir)
-    plot_basket_size_histogram(df, plots_dir)
-    plot_daily_sales_volume(df, plots_dir)
+    plot_inflation_check(cleaned, plots_dir)
+    plot_seasonality_check(cleaned, plots_dir)
+    plot_basket_analysis(cleaned, plots_dir)
+    plot_top_items(cleaned, plots_dir)
 
+    cleaned.to_csv(output_cleaned, index=False)
 
-def main() -> None:
-    args = parse_args()
-
-    input_path = resolve_input_path(args.input)
-    output_path = args.output
-    plots_dir = args.plots_dir
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    plots_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"[INFO] Loading raw dataset: {input_path}")
-    raw_df = pd.read_csv(input_path)
-
-    cleaned_df, audit = clean_pos_data(raw_df)
-
-    print("[INFO] Data quality audit summary:")
-    for key, value in audit.items():
-        print(f"  - {key}: {value}")
-
-    generate_all_plots(cleaned_df, plots_dir)
-
-    cleaned_df.to_csv(output_path, index=False)
-    print(f"[INFO] Cleaned dataset saved to: {output_path}")
-    print(f"[INFO] Plot exports saved to: {plots_dir}")
+    print(f"Saved cleaned dataset: {output_cleaned}")
+    print(f"Saved plots directory: {plots_dir}")
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    project_root = Path(__file__).resolve().parents[1]
+
+    input_path = resolve_input_with_fallback(resolve_path(args.input, project_root))
+    output_cleaned = resolve_path(args.output_cleaned, project_root)
+    plots_dir = resolve_path(args.plots_dir, project_root)
+
+    run(input_path, output_cleaned, plots_dir)
