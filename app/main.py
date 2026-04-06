@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import traceback
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -192,7 +193,7 @@ def _latest_product_row(df: pd.DataFrame, product_id: str) -> pd.Series:
     if subset.empty:
         raise HTTPException(
             status_code=404,
-            detail=f"No feature rows found for product_id='{product_id}'.",
+            detail="Product ID not found or lacks sufficient historical data to forecast.",
         )
 
     date_col = _detect_column(subset, DATE_CANDIDATE_COLUMNS)
@@ -209,11 +210,7 @@ def _build_inference_frame(
 ) -> pd.DataFrame:
     frame = pd.DataFrame([row.to_dict()])
 
-    # Keep only numeric fields where possible to reduce accidental string leakage,
-    # then align strictly to the training feature schema.
-    for column in frame.columns:
-        frame[column] = pd.to_numeric(frame[column], errors="ignore")
-
+    # Expand categorical values first, then align to the training feature schema.
     frame = pd.get_dummies(frame)
     frame = frame.reindex(columns=expected_columns, fill_value=0)
     frame = frame.apply(pd.to_numeric, errors="coerce").fillna(0)
@@ -293,7 +290,7 @@ def get_forecast(
     if weekly_df is None or monthly_df is None or model_bundles is None:
         raise HTTPException(status_code=503, detail="Model resources are not loaded yet.")
 
-    normalized_timeframe = timeframe.strip().lower()
+    normalized_timeframe = str(timeframe).strip().lower()
     if normalized_timeframe not in {"weekly", "monthly"}:
         raise HTTPException(status_code=400, detail="timeframe must be 'weekly' or 'monthly'.")
 
@@ -302,14 +299,34 @@ def get_forecast(
     if not bundle:
         raise HTTPException(status_code=503, detail=f"No model bundle configured for timeframe '{normalized_timeframe}'.")
 
+    product_column = _detect_column(source_df, PRODUCT_ID_CANDIDATE_COLUMNS)
+    if not product_column:
+        raise HTTPException(status_code=500, detail="No product identifier column found in feature file.")
+
+    product_exists = source_df[product_column].astype(str).str.strip().eq(product_id.strip()).any()
+    if not product_exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Product ID not found or lacks sufficient historical data to forecast.",
+        )
+
     try:
-        latest_row = _latest_product_row(source_df, product_id)
+        latest_row = _latest_product_row(source_df, product_id).fillna(0)
         inference_df = _build_inference_frame(latest_row, bundle["feature_columns"])
+        inference_df = inference_df.fillna(0)
 
         weighted_sum = 0.0
         weight_total = 0.0
         for model_name, model_obj in bundle["models"]:
             model_pred = float(model_obj.predict(inference_df)[0])
+            if not np.isfinite(model_pred):
+                logger.warning(
+                    "Skipping non-finite prediction from model=%s for product_id=%s timeframe=%s",
+                    model_name,
+                    product_id,
+                    normalized_timeframe,
+                )
+                continue
             model_weight = float(bundle["weights"].get(model_name, 0.0))
             if model_weight <= 0:
                 continue
@@ -326,6 +343,14 @@ def get_forecast(
         if MODEL_USES_LOG_TARGET:
             predicted_value = float(np.expm1(predicted_value))
 
+        if not np.isfinite(predicted_value):
+            logger.warning(
+                "Non-finite final prediction for product_id=%s timeframe=%s. Falling back to 0.",
+                product_id,
+                normalized_timeframe,
+            )
+            predicted_value = 0.0
+
         predicted_value = max(0.0, predicted_value)
         predicted_demand = int(np.rint(predicted_value))
 
@@ -338,6 +363,7 @@ def get_forecast(
         raise
     except Exception as exc:
         logger.exception("Forecast generation failed for product_id=%s timeframe=%s", product_id, normalized_timeframe)
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Forecast generation failed: {exc}") from exc
 
 
