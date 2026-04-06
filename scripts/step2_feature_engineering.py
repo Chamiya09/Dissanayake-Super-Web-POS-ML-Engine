@@ -7,244 +7,210 @@ import numpy as np
 import pandas as pd
 
 
-REQUIRED_COLUMNS = {
-    "ProductID",
-    "ProductName",
-    "Category",
-    "Date",
-    "Quantity",
-    "SellingPrice",
-}
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Step 2 - Advanced Multi-Level Feature Engineering"
+        description="Step 2: Advanced feature engineering for weekly and monthly aggregations"
     )
     parser.add_argument(
         "--input",
         type=Path,
         default=Path("data/processed/cleaned_pos_data.csv"),
-        help="Path to cleaned POS dataset",
+        help="Path to cleaned daily dataset",
     )
     parser.add_argument(
-        "--output",
+        "--weekly-output",
         type=Path,
-        default=Path("data/processed/final_features.csv"),
-        help="Path to final engineered feature dataset",
+        default=Path("data/processed/final_weekly_features.csv"),
+        help="Output path for weekly feature dataset",
     )
     parser.add_argument(
-        "--top-n",
-        type=int,
-        default=100,
-        help="Top N fast-moving items to keep",
+        "--monthly-output",
+        type=Path,
+        default=Path("data/processed/final_monthly_features.csv"),
+        help="Output path for monthly feature dataset",
     )
     return parser.parse_args()
 
 
-def load_clean_data(input_path: Path) -> pd.DataFrame:
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input dataset not found: {input_path}")
+def resolve_path(path: Path, project_root: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return project_root / path
 
-    df = pd.read_csv(input_path)
+
+def load_cleaned_data(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Cleaned dataset not found: {path}")
+
+    df = pd.read_csv(path, low_memory=False)
     df.columns = [c.strip() for c in df.columns]
 
-    missing = REQUIRED_COLUMNS - set(df.columns)
+    required = {
+        "Date",
+        "ProductID",
+        "ProductName",
+        "Category",
+        "Quantity",
+        "BuyingPrice",
+        "SellingPrice",
+        "UnitPrice",
+        "Total_LKR",
+    }
+    missing = required - set(df.columns)
     if missing:
         raise KeyError(f"Missing required columns: {sorted(missing)}")
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
-    df["SellingPrice"] = pd.to_numeric(df["SellingPrice"], errors="coerce")
 
-    df = df.dropna(subset=["ProductID", "ProductName", "Category", "Date", "Quantity", "SellingPrice"])
+    numeric_cols = ["Quantity", "BuyingPrice", "SellingPrice", "UnitPrice", "Total_LKR"]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=["Date", "ProductID", "ProductName", "Category", *numeric_cols]).copy()
+    df = df.sort_values(["ProductID", "Date"]).reset_index(drop=True)
+
     if df.empty:
-        raise ValueError("Dataset is empty after coercion/null cleanup.")
+        raise ValueError("No rows available after loading and validation.")
 
     return df
 
 
-def build_daily_panel(df: pd.DataFrame, top_n: int) -> pd.DataFrame:
-    # Top fast-moving items by total lifetime demand.
-    top_products = (
-        df.groupby("ProductID", as_index=False)["Quantity"]
-        .sum()
-        .sort_values("Quantity", ascending=False)
-        .head(top_n)["ProductID"]
-    )
+def add_common_flags(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
+    out = df.copy()
+    out["Is_Avurudu_Month"] = (out[date_col].dt.month == 4).astype(np.int8)
+    out["Is_Vesak_Month"] = (out[date_col].dt.month == 5).astype(np.int8)
+    out["Is_Christmas_Month"] = (out[date_col].dt.month == 12).astype(np.int8)
+    return out
 
-    top_df = df[df["ProductID"].isin(top_products)].copy()
-    if top_df.empty:
-        raise ValueError("No data found for selected top products.")
 
-    daily = (
-        top_df.groupby(["ProductID", "ProductName", "Category", "Date"], as_index=False)
-        .agg(Quantity=("Quantity", "sum"), SellingPrice=("SellingPrice", "mean"))
-        .sort_values(["ProductID", "Date"])
+def build_weekly_features(df: pd.DataFrame) -> pd.DataFrame:
+    weekly = (
+        df.groupby(
+            [
+                "ProductID",
+                "ProductName",
+                "Category",
+                pd.Grouper(key="Date", freq="W-SUN"),
+            ],
+            as_index=False,
+        )
+        .agg(
+            Quantity=("Quantity", "sum"),
+            UnitPrice=("UnitPrice", "mean"),
+            BuyingPrice=("BuyingPrice", "mean"),
+            SellingPrice=("SellingPrice", "mean"),
+            Total_LKR=("Total_LKR", "sum"),
+        )
+        .rename(columns={"Date": "Week_Ending_Sunday"})
+        .sort_values(["ProductID", "Week_Ending_Sunday"])
         .reset_index(drop=True)
     )
 
-    # Stable metadata for each ProductID used during date expansion.
-    product_meta = (
-        top_df.groupby("ProductID", as_index=False)
-        .agg(
-            ProductName=("ProductName", lambda s: s.mode().iat[0] if not s.mode().empty else s.iloc[0]),
-            Category=("Category", lambda s: s.mode().iat[0] if not s.mode().empty else s.iloc[0]),
-        )
-        .set_index("ProductID")
-    )
+    g = weekly.groupby("ProductID")
+    weekly["lag_1_week"] = g["Quantity"].shift(1)
+    weekly["lag_2_weeks"] = g["Quantity"].shift(2)
+    weekly["rolling_mean_4_weeks"] = g["Quantity"].shift(1).rolling(window=4, min_periods=4).mean()
 
-    min_date = daily["Date"].min()
-    max_date = daily["Date"].max()
-    full_dates = pd.date_range(min_date, max_date, freq="D")
+    weekly["price_difference"] = weekly["SellingPrice"] - weekly["BuyingPrice"]
+    weekly = add_common_flags(weekly, "Week_Ending_Sunday")
 
-    full_index = pd.MultiIndex.from_product(
-        [top_products.sort_values().tolist(), full_dates],
-        names=["ProductID", "Date"],
-    )
+    # Approximation: a week is payday week if its ending Sunday falls in the last 7 days of month.
+    days_in_month = weekly["Week_Ending_Sunday"].dt.days_in_month
+    weekly["Is_Payday_Week"] = (weekly["Week_Ending_Sunday"].dt.day >= (days_in_month - 6)).astype(np.int8)
 
-    panel = daily.set_index(["ProductID", "Date"]).reindex(full_index).reset_index()
-    panel = panel.merge(product_meta, left_on="ProductID", right_index=True, how="left", suffixes=("", "_meta"))
+    weekly = weekly.dropna(subset=["lag_1_week", "lag_2_weeks", "rolling_mean_4_weeks"]).copy()
+    weekly["log_quantity"] = np.log1p(weekly["Quantity"].clip(lower=0))
 
-    panel["ProductName"] = panel["ProductName"].fillna(panel["ProductName_meta"])
-    panel["Category"] = panel["Category"].fillna(panel["Category_meta"])
-    panel = panel.drop(columns=["ProductName_meta", "Category_meta"])
-
-    # Continuity rule: unsold day => Quantity 0, price carried forward from previous day.
-    panel["Quantity"] = panel["Quantity"].fillna(0.0)
-    panel["SellingPrice"] = panel.groupby("ProductID")["SellingPrice"].transform(lambda s: s.ffill().bfill())
-
-    # Final fallback only for products with all-null prices.
-    panel["SellingPrice"] = panel["SellingPrice"].fillna(top_df["SellingPrice"].median())
-
-    return panel.sort_values(["ProductID", "Date"]).reset_index(drop=True)
-
-
-def add_time_series_features(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    g = out.groupby("ProductID")
-
-    # Daily/weekly/monthly lags.
-    out["lag_1"] = g["Quantity"].shift(1)
-    out["lag_2"] = g["Quantity"].shift(2)
-    out["lag_3"] = g["Quantity"].shift(3)
-    out["lag_7"] = g["Quantity"].shift(7)
-    out["lag_14"] = g["Quantity"].shift(14)
-    out["lag_30"] = g["Quantity"].shift(30)
-
-    # Weekly/monthly trend features and weekly volatility.
-    out["rolling_mean_7"] = g["Quantity"].transform(
-        lambda s: s.shift(1).rolling(window=7, min_periods=7).mean()
-    )
-    out["rolling_mean_30"] = g["Quantity"].transform(
-        lambda s: s.shift(1).rolling(window=30, min_periods=30).mean()
-    )
-    out["rolling_std_7"] = g["Quantity"].transform(
-        lambda s: s.shift(1).rolling(window=7, min_periods=7).std()
-    )
-
-    return out
-
-
-def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-
-    out["DayOfWeek"] = out["Date"].dt.dayofweek.astype(int)
-    out["Month"] = out["Date"].dt.month.astype(int)
-    out["DayOfMonth"] = out["Date"].dt.day.astype(int)
-    out["Is_Weekend"] = (out["DayOfWeek"] >= 5).astype(int)
-
-    out["Is_Avurudu_Season"] = (
-        (out["Date"].dt.month == 4)
-        & (out["Date"].dt.day >= 1)
-        & (out["Date"].dt.day <= 20)
-    ).astype(int)
-    out["Is_Vesak_Season"] = (out["Date"].dt.month == 5).astype(int)
-    out["Is_Christmas_Season"] = (
-        (out["Date"].dt.month == 12) & (out["Date"].dt.day >= 15)
-    ).astype(int)
-
-    return out
-
-
-def finalize_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-
-    if (out["Quantity"] < 0).any():
-        raise ValueError("Quantity contains negative values; cannot apply log1p safely.")
-
-    out["log_quantity"] = np.log1p(out["Quantity"])
-
-    out = pd.get_dummies(out, columns=["Category"], prefix="Category", dtype=int)
-
-    lag_cols = [
-        "lag_1",
-        "lag_2",
-        "lag_3",
-        "lag_7",
-        "lag_14",
-        "lag_30",
-        "rolling_mean_7",
-        "rolling_mean_30",
-        "rolling_std_7",
-    ]
-    out = out.dropna(subset=lag_cols).reset_index(drop=True)
-
-    ordered_prefix = [
-        "ProductID",
-        "ProductName",
-        "Date",
+    float_cols = [
         "Quantity",
-        "log_quantity",
+        "UnitPrice",
+        "BuyingPrice",
         "SellingPrice",
-        "lag_1",
-        "lag_2",
-        "lag_3",
-        "lag_7",
-        "lag_14",
-        "lag_30",
-        "rolling_mean_7",
-        "rolling_mean_30",
-        "rolling_std_7",
-        "DayOfWeek",
-        "Month",
-        "DayOfMonth",
-        "Is_Weekend",
-        "Is_Avurudu_Season",
-        "Is_Vesak_Season",
-        "Is_Christmas_Season",
+        "Total_LKR",
+        "lag_1_week",
+        "lag_2_weeks",
+        "rolling_mean_4_weeks",
+        "price_difference",
+        "log_quantity",
     ]
+    weekly[float_cols] = weekly[float_cols].astype(np.float32)
 
-    category_cols = sorted([c for c in out.columns if c.startswith("Category_")])
-    remaining_cols = [c for c in out.columns if c not in ordered_prefix and c not in category_cols]
-
-    final_cols = [c for c in ordered_prefix if c in out.columns] + category_cols + remaining_cols
-    return out[final_cols]
+    return weekly
 
 
-def main() -> None:
-    args = parse_args()
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+def build_monthly_features(df: pd.DataFrame) -> pd.DataFrame:
+    monthly = (
+        df.groupby(
+            [
+                "ProductID",
+                "ProductName",
+                "Category",
+                pd.Grouper(key="Date", freq="MS"),
+            ],
+            as_index=False,
+        )
+        .agg(
+            Quantity=("Quantity", "sum"),
+            UnitPrice=("UnitPrice", "mean"),
+            BuyingPrice=("BuyingPrice", "mean"),
+            SellingPrice=("SellingPrice", "mean"),
+            Total_LKR=("Total_LKR", "sum"),
+        )
+        .rename(columns={"Date": "Month_Start"})
+        .sort_values(["ProductID", "Month_Start"])
+        .reset_index(drop=True)
+    )
 
-    print(f"[INFO] Loading cleaned data from: {args.input}")
-    clean_df = load_clean_data(args.input)
+    g = monthly.groupby("ProductID")
+    monthly["lag_1_month"] = g["Quantity"].shift(1)
+    monthly["lag_2_months"] = g["Quantity"].shift(2)
+    monthly["rolling_mean_3_months"] = g["Quantity"].shift(1).rolling(window=3, min_periods=3).mean()
 
-    print(f"[INFO] Building top-{args.top_n} daily panel with continuity")
-    daily_panel = build_daily_panel(clean_df, top_n=args.top_n)
+    monthly["price_difference"] = monthly["SellingPrice"] - monthly["BuyingPrice"]
+    monthly = add_common_flags(monthly, "Month_Start")
 
-    print("[INFO] Creating hierarchical time-series features")
-    featured = add_time_series_features(daily_panel)
+    monthly = monthly.dropna(subset=["lag_1_month", "lag_2_months", "rolling_mean_3_months"]).copy()
+    monthly["log_quantity"] = np.log1p(monthly["Quantity"].clip(lower=0))
 
-    print("[INFO] Adding Sri Lankan temporal and seasonal features")
-    featured = add_calendar_features(featured)
+    float_cols = [
+        "Quantity",
+        "UnitPrice",
+        "BuyingPrice",
+        "SellingPrice",
+        "Total_LKR",
+        "lag_1_month",
+        "lag_2_months",
+        "rolling_mean_3_months",
+        "price_difference",
+        "log_quantity",
+    ]
+    monthly[float_cols] = monthly[float_cols].astype(np.float32)
 
-    print("[INFO] Applying log transform, category encoding, and lag NaN cleanup")
-    final_df = finalize_dataset(featured)
+    return monthly
 
-    final_df.to_csv(args.output, index=False)
-    print(f"[INFO] Final features saved to: {args.output}")
-    print(f"[INFO] Final shape: {final_df.shape}")
+
+def run(input_path: Path, weekly_output: Path, monthly_output: Path) -> None:
+    df = load_cleaned_data(input_path)
+
+    weekly = build_weekly_features(df)
+    monthly = build_monthly_features(df)
+
+    weekly_output.parent.mkdir(parents=True, exist_ok=True)
+    monthly_output.parent.mkdir(parents=True, exist_ok=True)
+
+    weekly.to_csv(weekly_output, index=False)
+    monthly.to_csv(monthly_output, index=False)
+
+    print(f"Saved weekly features: {weekly_output} | rows={len(weekly):,}")
+    print(f"Saved monthly features: {monthly_output} | rows={len(monthly):,}")
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    project_root = Path(__file__).resolve().parents[1]
+
+    input_path = resolve_path(args.input, project_root)
+    weekly_output = resolve_path(args.weekly_output, project_root)
+    monthly_output = resolve_path(args.monthly_output, project_root)
+
+    run(input_path, weekly_output, monthly_output)
