@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import traceback
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
@@ -21,8 +22,22 @@ MODEL_PATH = PROJECT_ROOT / "models" / "dissanayaka_master_model.pkl"
 WEEKLY_FEATURES_PATH = PROJECT_ROOT / "data" / "processed" / "final_weekly_features.csv"
 MONTHLY_FEATURES_PATH = PROJECT_ROOT / "data" / "processed" / "final_monthly_features.csv"
 
-# Set to False if your model target was NOT log-transformed.
-MODEL_USES_LOG_TARGET = True
+
+def _parse_env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+# Set MODEL_USES_LOG_TARGET=false when regressors are trained on raw quantities.
+MODEL_USES_LOG_TARGET = _parse_env_bool("MODEL_USES_LOG_TARGET", True)
+MAX_REASONABLE_DEMAND = 1_000_000.0
 
 DATE_CANDIDATE_COLUMNS = [
     "date",
@@ -92,6 +107,11 @@ def _canonical_weight_key(model_name: str) -> str | None:
     return None
 
 
+def _is_classifier_name(model_name: str) -> bool:
+    lower = model_name.lower()
+    return "classifier" in lower or lower in {"clf", "class_model"}
+
+
 def _normalize_weights(model_names: list[str], weight_map: Mapping[str, Any] | None) -> dict[str, float]:
     if not model_names:
         return {}
@@ -123,12 +143,13 @@ def _resolve_timeframe_bundle(
     feature_df: pd.DataFrame,
 ) -> dict[str, Any]:
     if _has_predict(artifact):
-        model_names = ["model"]
-        models = [("model", artifact)]
+        regressor_names = ["model"]
+        regressors = [("model", artifact)]
         weights = {"model": 1.0}
         feature_columns = _get_model_feature_columns(artifact, feature_df, feature_df)
         return {
-            "models": models,
+            "regressors": regressors,
+            "classifier": None,
             "weights": weights,
             "feature_columns": feature_columns,
         }
@@ -141,35 +162,35 @@ def _resolve_timeframe_bundle(
         raise RuntimeError(f"Artifact is missing '{timeframe}' model section.")
 
     candidate_order = ["xgb_regressor", "lgbm_regressor", "rf_regressor"]
-    models: list[tuple[str, Any]] = []
+    regressors: list[tuple[str, Any]] = []
+    classifier = section.get("classifier") if _has_predict(section.get("classifier")) else None
 
     for key in candidate_order:
         model = section.get(key)
         if _has_predict(model):
-            models.append((key, model))
+            regressors.append((key, model))
 
-    if not models:
+    if not regressors:
         for key, value in section.items():
-            if key == "classifier":
+            if key in {"classifier", "feature_columns", "weights", "metadata"}:
+                continue
+            if _is_classifier_name(str(key)):
                 continue
             if _has_predict(value):
-                models.append((str(key), value))
+                regressors.append((str(key), value))
 
-    if not models and _has_predict(section.get("classifier")):
-        models.append(("classifier", section["classifier"]))
-
-    if not models:
-        raise RuntimeError(f"No predict-capable model found in '{timeframe}' section.")
+    if not regressors:
+        raise RuntimeError(f"No regressor model found in '{timeframe}' section.")
 
     global_weights = artifact.get("weights") if isinstance(artifact.get("weights"), Mapping) else None
-    model_names = [name for name, _ in models]
-    weights = _normalize_weights(model_names, global_weights)
+    regressor_names = [name for name, _ in regressors]
+    weights = _normalize_weights(regressor_names, global_weights)
 
     raw_feature_columns = section.get("feature_columns")
     if isinstance(raw_feature_columns, list) and raw_feature_columns:
         feature_columns = [str(col) for col in raw_feature_columns]
-    elif hasattr(models[0][1], "feature_names_in_"):
-        feature_columns = list(models[0][1].feature_names_in_)
+    elif hasattr(regressors[0][1], "feature_names_in_"):
+        feature_columns = list(regressors[0][1].feature_names_in_)
     else:
         feature_columns = [
             col
@@ -178,7 +199,8 @@ def _resolve_timeframe_bundle(
         ]
 
     return {
-        "models": models,
+        "regressors": regressors,
+        "classifier": classifier,
         "weights": weights,
         "feature_columns": feature_columns,
     }
@@ -243,13 +265,15 @@ async def lifespan(app: FastAPI):
 
     logger.info("Model loaded from %s", MODEL_PATH)
     logger.info(
-        "Weekly models: %s",
-        ", ".join(name for name, _ in weekly_bundle["models"]),
+        "Weekly regressors: %s",
+        ", ".join(name for name, _ in weekly_bundle["regressors"]),
     )
     logger.info(
-        "Monthly models: %s",
-        ", ".join(name for name, _ in monthly_bundle["models"]),
+        "Monthly regressors: %s",
+        ", ".join(name for name, _ in monthly_bundle["regressors"]),
     )
+    logger.info("Weekly classifier present: %s", weekly_bundle["classifier"] is not None)
+    logger.info("Monthly classifier present: %s", monthly_bundle["classifier"] is not None)
     logger.info("Weekly features loaded: %d rows", len(weekly_df))
     logger.info("Monthly features loaded: %d rows", len(monthly_df))
     logger.info("Weekly inference feature count: %d", len(weekly_bundle["feature_columns"]))
@@ -311,37 +335,68 @@ def get_forecast(
         )
 
     try:
-        latest_row = _latest_product_row(source_df, product_id).fillna(0)
+        normalized_product_id = product_id.strip()
+        latest_row = _latest_product_row(source_df, normalized_product_id).fillna(0)
         inference_df = _build_inference_frame(latest_row, bundle["feature_columns"])
         inference_df = inference_df.fillna(0)
 
+        classifier_output: float | None = None
+        classifier_model = bundle.get("classifier")
+        if classifier_model is not None:
+            try:
+                classifier_output = float(classifier_model.predict(inference_df)[0])
+            except Exception as exc:
+                logger.warning(
+                    "Classifier inference failed for product_id=%s timeframe=%s: %s",
+                    normalized_product_id,
+                    normalized_timeframe,
+                    exc,
+                )
+
         weighted_sum = 0.0
         weight_total = 0.0
-        for model_name, model_obj in bundle["models"]:
-            model_pred = float(model_obj.predict(inference_df)[0])
-            if not np.isfinite(model_pred):
+        regressor_outputs: dict[str, float] = {}
+        for model_name, model_obj in bundle["regressors"]:
+            reg_out = float(model_obj.predict(inference_df)[0])
+            regressor_outputs[model_name] = reg_out
+            if not np.isfinite(reg_out):
                 logger.warning(
                     "Skipping non-finite prediction from model=%s for product_id=%s timeframe=%s",
                     model_name,
-                    product_id,
+                    normalized_product_id,
                     normalized_timeframe,
                 )
                 continue
             model_weight = float(bundle["weights"].get(model_name, 0.0))
             if model_weight <= 0:
                 continue
-            weighted_sum += model_pred * model_weight
+            weighted_sum += reg_out * model_weight
             weight_total += model_weight
 
+        print(f"Classifier Output: {classifier_output}, Regressor Output: {regressor_outputs}")
+
         if weight_total <= 0:
-            # Fallback to the first model if weights are missing or invalid.
-            first_model = bundle["models"][0][1]
-            predicted_value = float(first_model.predict(inference_df)[0])
+            # Fallback to first regressor if weights are missing/invalid.
+            first_regressor = bundle["regressors"][0][1]
+            predicted_value = float(first_regressor.predict(inference_df)[0])
         else:
             predicted_value = weighted_sum / weight_total
 
+        raw_regressor_value = predicted_value
         if MODEL_USES_LOG_TARGET:
-            predicted_value = float(np.expm1(predicted_value))
+            transformed_value = float(np.expm1(predicted_value))
+            if not np.isfinite(transformed_value) or transformed_value > MAX_REASONABLE_DEMAND:
+                logger.warning(
+                    "Transformed prediction looks invalid (raw=%s, transformed=%s) for product_id=%s timeframe=%s; using raw regressor value. "
+                    "Set MODEL_USES_LOG_TARGET=false if model is trained on raw quantities.",
+                    raw_regressor_value,
+                    transformed_value,
+                    normalized_product_id,
+                    normalized_timeframe,
+                )
+                predicted_value = raw_regressor_value
+            else:
+                predicted_value = transformed_value
 
         if not np.isfinite(predicted_value):
             logger.warning(
@@ -355,7 +410,7 @@ def get_forecast(
         predicted_demand = int(np.rint(predicted_value))
 
         return {
-            "product_id": product_id,
+            "product_id": normalized_product_id,
             "timeframe": normalized_timeframe,
             "predicted_demand": predicted_demand,
         }
