@@ -72,3 +72,6 @@ data/interim/
 # Local databases
 *.db
 *.sqlite3
+
+# Images
+exports/plots/*.png
