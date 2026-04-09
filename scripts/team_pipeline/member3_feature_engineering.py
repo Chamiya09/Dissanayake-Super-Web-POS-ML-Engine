@@ -1,41 +1,8 @@
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Step 2: Advanced feature engineering for weekly and monthly aggregations"
-    )
-    parser.add_argument(
-        "--input",
-        type=Path,
-        default=Path("data/processed/cleaned_pos_data.csv"),
-        help="Path to cleaned daily dataset",
-    )
-    parser.add_argument(
-        "--weekly-output",
-        type=Path,
-        default=Path("data/processed/final_weekly_features.csv"),
-        help="Output path for weekly feature dataset",
-    )
-    parser.add_argument(
-        "--monthly-output",
-        type=Path,
-        default=Path("data/processed/final_monthly_features.csv"),
-        help="Output path for monthly feature dataset",
-    )
-    return parser.parse_args()
-
-
-def resolve_path(path: Path, project_root: Path) -> Path:
-    if path.is_absolute():
-        return path
-    return project_root / path
+from pathlib import Path
 
 
 def load_cleaned_data(path: Path) -> pd.DataFrame:
@@ -187,30 +154,3 @@ def build_monthly_features(df: pd.DataFrame) -> pd.DataFrame:
     monthly[float_cols] = monthly[float_cols].astype(np.float32)
 
     return monthly
-
-
-def run(input_path: Path, weekly_output: Path, monthly_output: Path) -> None:
-    df = load_cleaned_data(input_path)
-
-    weekly = build_weekly_features(df)
-    monthly = build_monthly_features(df)
-
-    weekly_output.parent.mkdir(parents=True, exist_ok=True)
-    monthly_output.parent.mkdir(parents=True, exist_ok=True)
-
-    weekly.to_csv(weekly_output, index=False)
-    monthly.to_csv(monthly_output, index=False)
-
-    print(f"Saved weekly features: {weekly_output} | rows={len(weekly):,}")
-    print(f"Saved monthly features: {monthly_output} | rows={len(monthly):,}")
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    project_root = Path(__file__).resolve().parents[1]
-
-    input_path = resolve_path(args.input, project_root)
-    weekly_output = resolve_path(args.weekly_output, project_root)
-    monthly_output = resolve_path(args.monthly_output, project_root)
-
-    run(input_path, weekly_output, monthly_output)

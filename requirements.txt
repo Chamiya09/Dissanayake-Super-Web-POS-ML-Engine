@@ -6,3 +6,8 @@ numpy
 psycopg2-binary
 SQLAlchemy
 jupyter
+matplotlib
+seaborn
+joblib
+lightgbm
+xgboost
