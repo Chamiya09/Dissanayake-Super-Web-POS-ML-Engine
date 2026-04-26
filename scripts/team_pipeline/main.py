@@ -13,7 +13,13 @@ from member2_eda import run_eda_plots
 from member3_feature_engineering import build_monthly_features, build_weekly_features, load_cleaned_data
 from member4_data_preparation import build_feature_columns, load_feature_data
 from member5_modeling import train_two_stage
-from member6_evaluation import build_accuracy_table, plot_top_product, save_model_artifact
+from member6_evaluation import (
+    build_accuracy_table,
+    plot_top_product,
+    save_model_artifact,
+    plot_actual_vs_predicted_chart,
+    print_model_performance,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,6 +79,7 @@ def run_pipeline(
     monthly_output: Path,
     model_output: Path,
     plot_output: Path,
+    actual_vs_predicted_chart_output: Path,
 ) -> None:
     cleaned = load_and_validate(input_path)
     cleaned = apply_price_cleaning(cleaned)
@@ -113,6 +120,15 @@ def run_pipeline(
     print("\nFull Scale Accuracy Table")
     print(table.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
 
+    print_model_performance(weekly_result["metrics"], monthly_result["metrics"])
+
+    plot_actual_vs_predicted_chart(
+        weekly_result["predictions"],
+        monthly_result["predictions"],
+        actual_vs_predicted_chart_output,
+    )
+    print(f"Saved actual-vs-predicted chart: {actual_vs_predicted_chart_output}")
+
     plot_top_product(weekly_result["predictions"], monthly_result["predictions"], plot_output)
     print(f"\nSaved forecast plot: {plot_output}")
 
@@ -131,6 +147,7 @@ def main() -> None:
     monthly_output = resolve_path(args.monthly_output, project_root)
     model_output = resolve_path(args.model_output, project_root)
     plot_output = resolve_path(args.plot_output, project_root)
+    actual_vs_predicted_chart_output = project_root / "actual_vs_predicted_chart.png"
 
     run_pipeline(
         input_path=input_path,
@@ -140,6 +157,7 @@ def main() -> None:
         monthly_output=monthly_output,
         model_output=model_output,
         plot_output=plot_output,
+        actual_vs_predicted_chart_output=actual_vs_predicted_chart_output,
     )
 
 
