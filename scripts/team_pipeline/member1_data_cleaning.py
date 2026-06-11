@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+from pandas.errors import ParserError
 
 
 RAW_FALLBACK_NAME = "DISSANAYAKA_POS_DATASET_2018-2025.csv"
@@ -58,8 +59,28 @@ def align_input_schema(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _read_csv_robust(input_path: Path) -> pd.DataFrame:
+    attempts = [
+        {"low_memory": False},
+        {"low_memory": False, "engine": "python"},
+        {"low_memory": False, "engine": "python", "encoding": "utf-8-sig"},
+        {"low_memory": False, "engine": "python", "encoding": "latin1"},
+    ]
+
+    last_error: Exception | None = None
+    for options in attempts:
+        try:
+            print(f"[INFO] Loading dataset with options: {options}")
+            return pd.read_csv(input_path, **options)
+        except (ParserError, UnicodeDecodeError, OSError, ValueError) as exc:
+            last_error = exc
+            print(f"[WARN] Failed to read dataset using {options}: {exc}")
+
+    raise RuntimeError(f"Failed to load dataset from {input_path}: {last_error}") from last_error
+
+
 def load_and_validate(input_path: Path) -> pd.DataFrame:
-    df = pd.read_csv(input_path, low_memory=False)
+    df = _read_csv_robust(input_path)
     df.columns = [c.strip() for c in df.columns]
     df = align_input_schema(df)
 
