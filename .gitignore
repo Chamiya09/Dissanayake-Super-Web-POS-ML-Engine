@@ -1,18 +1,15 @@
-# Byte-compiled / optimized / DLL files
+# Python bytecode
 __pycache__/
 *.py[cod]
 *$py.class
 
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
+# Build / packaging
 build/
 dist/
 *.egg-info/
 .eggs/
 wheelhouse/
+.Python
 
 # Virtual environments
 .venv/
@@ -20,28 +17,27 @@ venv/
 env/
 ENV/
 
-# Environment variables and secrets
+# Environment files / secrets
 .env
 .env.*
 !.env.example
 *.secrets
 
-# IDE / editor
+# IDE / OS
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
 *.swp
 *.swo
 *~
 
-# OS files
-.DS_Store
-Thumbs.db
-
-# Logs
+# Logs / runtime
 *.log
 logs/
+*.pid
 
-# Testing and coverage
+# Testing / caches
 .pytest_cache/
 .coverage
 .coverage.*
@@ -54,24 +50,34 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 
-# FastAPI / runtime
-*.pid
-
-# ML artifacts and experiment outputs
-models/*.pkl
-models/*.joblib
-models/*.onnx
-mlruns/
-wandb/
-
-# Data folders (raw/processed/intermediate)
-data/raw/
-data/processed/
-data/interim/
-
 # Local databases
 *.db
 *.sqlite3
 
-# Images
-exports/plots/*.png
+# ML experiment outputs
+mlruns/
+wandb/
+exports/plots/
+actual_vs_predicted_chart.png
+
+# Large raw datasets / generated features
+data/raw/
+data/processed/
+data/interim/
+*.csv
+*.xlsx
+*.tsv
+*.parquet
+*.feather
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Explicitly track trained model artifacts
+!*.pkl
+!*.h5
+!*.joblib
+!models/
+!models/**
