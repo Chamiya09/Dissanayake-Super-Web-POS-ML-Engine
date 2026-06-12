@@ -76,7 +76,7 @@ data/interim/
 *.onnx
 
 # Explicitly track trained model artifacts
-!*.pkl
+*.pkl
 !*.h5
 !*.joblib
 !models/
