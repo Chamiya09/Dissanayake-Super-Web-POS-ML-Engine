@@ -81,3 +81,5 @@ data/interim/
 !*.joblib
 !models/
 !models/**
+models/*.pkl
+models/**/*.pkl
