@@ -1,37 +1,48 @@
-# Dissanayake-Super-Web-POS-ML-Engine
+# Dissanayaka Super Web POS - ML Engine
 
-FastAPI-based demand forecasting service for the Dissanayake Super Web POS system.  
-This project contains:
+FastAPI demand forecasting service for the Dissanayaka Super Web POS system. The ML engine trains demand models from POS sales data and exposes forecast endpoints used by inventory planning and dashboard features.
 
-- the ML API used by the frontend dashboard
-- the training pipeline that prepares features and trains the forecast model
+## Tech Stack
+
+- Python 3.11 recommended
+- FastAPI
+- Uvicorn
+- Pandas
+- NumPy
+- scikit-learn
+- LightGBM
+- XGBoost
+- Joblib
+- Matplotlib and Seaborn
+- PostgreSQL / SQLAlchemy support
+
+## Main Features
+
+- Demand forecast API for weekly and monthly product demand.
+- Model health endpoint for operational checks.
+- Training pipeline for cleaning raw POS data, creating features, and generating model artifacts.
+- Processed weekly and monthly feature datasets.
+- Configurable model path and log-target prediction behavior.
 
 ## Prerequisites
 
-- Python `3.11` recommended
-- `git`
-- A local copy of the raw dataset CSV if you want to train the model
+- Python 3.11.x recommended
+- pip
+- A raw POS dataset CSV if you need to train locally
+- Generated model and processed feature files if you only need to run the API
 
-Recommended Python version:
-
-```text
-Python 3.11.x
-```
-
-## Clone The Repository
-
-```bash
-git clone <your-github-repository-url>
-cd Dissanayake-Super-Web-POS-ML-Engine
-```
-
-## Create A Virtual Environment
+## Quick Start
 
 ### Windows PowerShell
 
 ```powershell
+cd "D:\Project\GitHub Project\Dissanayaka Super Web POS\Dissanayake-Super-Web-POS-ML-Engine"
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install -r requirements.txt
+Copy-Item .env.example .env
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 If PowerShell blocks activation:
@@ -41,146 +52,147 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
 ```
 
-### Mac / Linux
+### macOS / Linux
 
 ```bash
+cd Dissanayake-Super-Web-POS-ML-Engine
 python3.11 -m venv .venv
 source .venv/bin/activate
-```
-
-## Install Dependencies
-
-```bash
 pip install --upgrade pip
 pip install -r requirements.txt
-```
-
-## Environment Setup
-
-Copy the example environment file:
-
-### Windows PowerShell
-
-```powershell
-Copy-Item .env.example .env
-```
-
-### Mac / Linux
-
-```bash
 cp .env.example .env
-```
-
-Current environment variables:
-
-- `APP_ENV` - application environment, usually `development`
-- `DATABASE_URL` - optional database connection string
-- `MODEL_PATH` - path to the trained model artifact
-- `MODEL_USES_LOG_TARGET` - set to `true` if the trained model predicts log-transformed demand, otherwise `false`
-
-## Important Note About Shared Files
-
-This repository ignores:
-
-- virtual environments
-- local `.env` files
-- raw / processed datasets
-- trained model artifacts
-
-That means a teammate can clone the repo and install dependencies immediately, but they must also do one of these before the ML API can return forecasts:
-
-1. place the trained model and processed feature files in the expected folders, or
-2. run the training pipeline locally to generate them
-
-Expected generated files:
-
-- `models/dissanayaka_master_model.pkl`
-- `data/processed/final_weekly_features.csv`
-- `data/processed/final_monthly_features.csv`
-
-## Training The Model Locally
-
-The training pipeline expects a raw CSV dataset. By default it looks for:
-
-```text
-data/raw/DISSANAYAKA_POS_DATASET_2018-2025.csv
-```
-
-If your file is somewhere else, pass it explicitly:
-
-### Windows PowerShell
-
-```powershell
-.\.venv\Scripts\python.exe scripts\team_pipeline\main.py --input "C:\path\to\DISSANAYAKA_POS_DATASET_2018-2025.csv"
-```
-
-### Mac / Linux
-
-```bash
-python scripts/team_pipeline/main.py --input "/path/to/DISSANAYAKA_POS_DATASET_2018-2025.csv"
-```
-
-When the pipeline finishes successfully, it generates the processed feature files and trained model required by the API.
-
-## Start The Development Server
-
-After the model artifact and processed feature files exist, start the FastAPI server:
-
-### Windows PowerShell
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-```
-
-### Mac / Linux
-
-```bash
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-API will be available at:
+The API starts on:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-Useful endpoints:
+## Environment Variables
 
-- `GET /health`
-- `GET /api/forecast?product_id=PI00001&timeframe=weekly`
-- `GET /api/forecast?product_id=PI00001&timeframe=monthly`
-- `GET /api/model-health`
+Copy `.env.example` to `.env` and adjust values as needed:
 
-## Typical First-Time Setup Flow
+```env
+APP_ENV=development
+DATABASE_URL=your_database_url_here
+MODEL_PATH=models/dissanayaka_master_model.pkl
+MODEL_USES_LOG_TARGET=true
+```
 
-1. Clone the repo.
-2. Create and activate `.venv`.
-3. Install dependencies with `pip install -r requirements.txt`.
-4. Copy `.env.example` to `.env`.
-5. Run the training pipeline if model/data artifacts are not already available.
-6. Start the FastAPI server with Uvicorn.
+Variable meanings:
+
+- `APP_ENV` - runtime environment label, usually `development`.
+- `DATABASE_URL` - optional database connection string for database-backed workflows.
+- `MODEL_PATH` - path to the trained model artifact.
+- `MODEL_USES_LOG_TARGET` - set to `true` when the trained model predicts log-transformed demand.
+
+## Required Generated Files
+
+The repository ignores datasets, processed data, and trained model artifacts. To run forecasts, create or copy these files:
+
+```text
+models/dissanayaka_master_model.pkl
+data/processed/final_weekly_features.csv
+data/processed/final_monthly_features.csv
+```
+
+If these files are missing, run the training pipeline.
+
+## Training The Model
+
+Default expected raw dataset path:
+
+```text
+data/raw/DISSANAYAKA_POS_DATASET_2018-2025.csv
+```
+
+Run training with an explicit input path:
+
+### Windows PowerShell
+
+```powershell
+.\.venv\Scripts\python.exe scripts\team_pipeline\main.py --input "D:\Project\GitHub Project\Dissanayaka Super Web POS\DISSANAYAKA_POS_DATASET_2018-2025.csv"
+```
+
+### macOS / Linux
+
+```bash
+python scripts/team_pipeline/main.py --input "/path/to/DISSANAYAKA_POS_DATASET_2018-2025.csv"
+```
+
+After training completes, the pipeline should generate the model and processed feature files used by the API.
+
+## API Endpoints
+
+```text
+GET /health
+GET /api/model-health
+GET /api/forecast?product_id=PI00001&timeframe=weekly
+GET /api/forecast?product_id=PI00001&timeframe=monthly
+```
+
+Interactive API docs:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+OpenAPI schema:
+
+```text
+http://127.0.0.1:8000/openapi.json
+```
+
+## Project Structure
+
+```text
+app/
+  main.py              Primary FastAPI app used by Uvicorn
+  api/                 Additional API module and route code
+
+scripts/
+  team_pipeline/       Training and feature engineering pipeline
+
+data/
+  raw/                 Local raw datasets, ignored by Git
+  processed/           Generated feature files, ignored by Git
+
+models/                Generated model artifacts, ignored by Git
+exports/               Generated plots and outputs, ignored by Git
+```
+
+## Development Workflow
+
+1. Create and activate `.venv`.
+2. Install dependencies.
+3. Copy `.env.example` to `.env`.
+4. Train the model or copy existing generated files.
+5. Start Uvicorn.
+6. Test `/health`, `/api/model-health`, and `/api/forecast`.
 
 ## Troubleshooting
 
 ### `ModuleNotFoundError`
 
-Dependencies are not installed in the active virtual environment.
+The virtual environment is not active or dependencies are not installed:
 
-```bash
+```powershell
 pip install -r requirements.txt
 ```
 
 ### `Model artifact not found`
 
-Run the training pipeline first, or place the trained model file in:
+Train the model or place the artifact at:
 
 ```text
 models/dissanayaka_master_model.pkl
 ```
 
-### `Product ID not found`
+### Forecast returns product not found
 
-The API expects product IDs in the trained dataset format, for example:
+Use the product ID format found in the processed feature files, for example:
 
 ```text
 PI00001
@@ -188,4 +200,10 @@ PI00001
 
 ### CSV parser errors during training
 
-Use the updated pipeline loader and pass the dataset path explicitly with `--input`.
+Pass the dataset path explicitly with `--input` and confirm the CSV headers match the training pipeline expectations.
+
+## Deployment Notes
+
+- Do not commit `.env`, raw datasets, processed datasets, or trained model artifacts.
+- Provide `MODEL_PATH` and generated files through deployment storage.
+- Run the API with a production ASGI server configuration instead of `--reload`.
